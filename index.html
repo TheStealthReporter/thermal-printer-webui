@@ -1360,7 +1360,9 @@
      */
 
     $("fontSize").addEventListener("input", () => {
-      $("fontSizeValue").textContent = $("fontSize").value; renderText();
+      localStorage.setItem("fontSize", fontSize.value);
+      $("fontSizeValue").textContent = $("fontSize").value;
+      renderText();
     });
 
 
@@ -1483,6 +1485,16 @@
      * INITIAL RENDER
      * ============================================================
      */
+
+    {
+      const fontSize = $("fontSize");
+      const fontSizeValue = $("fontSizeValue");
+      const savedFontSize = localStorage.getItem("fontSize");
+      if (savedFontSize) {
+        fontSize.value = savedFontSize;
+        fontSizeValue.textContent = fontSize.value;
+      }
+    }
 
     renderText();
 
