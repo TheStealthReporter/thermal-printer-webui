@@ -1,0 +1,1494 @@
+<!doctype html>
+
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#ffffff">
+  <title>L13 Web Serial Text Printer</title>
+
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 900px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+    }
+
+    button {
+      padding: .7rem 1rem;
+      margin: .25rem;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: .5;
+    }
+
+    input[type="text"] {
+      width: 100%;
+      box-sizing: border-box;
+      padding: .7rem;
+      font-size: 20px;
+      margin-bottom: 1rem;
+    }
+
+    input[type="number"] {
+      padding: .5rem;
+      width: 100px;
+    }
+
+    /*
+     * The INTERNAL canvas height is always 96 pixels.
+     *
+     * The displayed height is also 96px here so that the
+     * preview represents the actual printer dot height.
+     *
+     * Width is automatically determined by the text.
+     */
+    canvas {
+      display: block;
+      height: 96px;
+      width: auto;
+      border: 1px solid #ccc;
+      background: white;
+      margin: 1rem 0;
+    }
+
+    #fontSize {
+      width: 100%;
+    }
+
+    #status {
+      margin-top: 1rem;
+      padding: 1rem;
+      white-space: pre-wrap;
+      background: #f5f5f5;
+      border-radius: 8px;
+    }
+
+    .info {
+      font-size: .9rem;
+      color: #666;
+    }
+  </style>
+
+</head>
+
+<body>
+
+  <h1>L13 Web Serial Text Printer</h1>
+
+  <p>
+    Enter text, preview it on the 96-dot-high canvas,
+    then print it over Web Serial.
+  </p>
+
+  <!-- =========================================================
+     TEXT INPUT
+     ========================================================= -->
+
+  <input id="text" type="text" value="Hello World!" placeholder="Enter text..." autocomplete="off">
+
+  <!-- =========================================================
+     CANVAS
+     ========================================================= -->
+
+  <canvas id="canvas" width="1" height="96"> </canvas>
+
+  <p class="info">
+    Canvas:
+    <span id="canvasWidth">0</span>
+    ×
+    <span id="canvasHeight">96</span>
+    px
+  </p>
+
+  <!-- =========================================================
+     CONTROLS
+     ========================================================= -->
+
+  <div>
+
+    <button id="connect">
+      Connect
+    </button>
+
+    <button id="print" disabled>
+      Print
+    </button>
+
+    <button id="disconnect" disabled>
+      Disconnect
+    </button>
+
+  </div>
+
+  <p>
+
+    <label>
+      Font size:
+
+      <input id="fontSize" type="range" value="48" min="1" max="96">
+      <span id="fontSizeValue">48</span> px
+
+    </label>
+
+  </p>
+
+  <!-- =========================================================
+     STATUS
+     ========================================================= -->
+
+  <div id="status">
+    Disconnected.
+  </div>
+
+  <script>
+
+    "use strict";
+
+
+    /*
+     * ============================================================
+     * SERIAL CONFIGURATION
+     * ============================================================
+     */
+
+    const SERIAL = {
+
+      baudRate: 115200
+
+    };
+
+
+    /*
+     * ============================================================
+     * L13 PROTOCOL
+     * ============================================================
+     */
+
+    const L13 = {
+
+      /*
+       * The source canvas is always 96 pixels high.
+       */
+
+      HEIGHT: 96,
+
+
+      /*
+       * Enable printer.
+       *
+       * 10 FF F1 03
+       */
+
+      ENABLE: Uint8Array.from([
+        0x10,
+        0xff,
+        0xf1,
+        0x03
+      ]),
+
+
+      /*
+       * Stop printer.
+       *
+       * 10 FF F1 45
+       */
+
+      STOP: Uint8Array.from([
+        0x10,
+        0xff,
+        0xf1,
+        0x45
+      ]),
+
+
+      /*
+       * Medium density.
+       *
+       * 10 FF 10 00 02
+       */
+
+      SET_DENSITY_MEDIUM: Uint8Array.from([
+        0x10,
+        0xff,
+        0x10,
+        0x00,
+        0x02
+      ]),
+
+
+      /*
+       * Paper gap.
+       *
+       * Currently not sent because it was commented out
+       * in the original working protocol.
+       */
+
+      SET_PAPER_GAP: Uint8Array.from([
+        0x10,
+        0xff,
+        0x84,
+        0x00
+      ]),
+
+
+      /*
+       * Wake.
+       *
+       * 12 zero bytes.
+       */
+
+      WAKE: new Uint8Array(12),
+
+
+      /*
+       * Form feed.
+       *
+       * 1D 0C
+       */
+
+      FORM_FEED: Uint8Array.from([
+        0x1d,
+        0x0c
+      ]),
+
+
+      /*
+       * Advance.
+       *
+       * 1B 4A 28
+       *
+       * 0x28 = 40 dots
+       */
+
+      ADVANCE: Uint8Array.from([
+        0x1b,
+        0x4a,
+        110
+      ])
+
+    };
+
+
+    /*
+     * ============================================================
+     * APPLICATION STATE
+     * ============================================================
+     */
+
+    let port = null;
+
+    let writer = null;
+
+
+    /*
+     * ============================================================
+     * DOM ELEMENTS
+     * ============================================================
+     */
+
+    const $ = id =>
+      document.getElementById(id);
+
+
+    const canvas =
+      $("canvas");
+
+
+    const ctx =
+      canvas.getContext("2d");
+
+
+    /*
+     * ============================================================
+     * STATUS
+     * ============================================================
+     */
+
+    function status(text) {
+      console.log(text);
+      $("status").textContent = text;
+    }
+
+
+    /*
+     * ============================================================
+     * HEX DUMP
+     * ============================================================
+     */
+
+    function hex(data) {
+
+      return [...new Uint8Array(data)]
+
+        .map(
+          b =>
+            b
+              .toString(16)
+              .padStart(2, "0")
+              .toUpperCase()
+        )
+
+        .join(" ");
+
+    }
+
+
+    /*
+     * ============================================================
+     * RENDER TEXT TO CANVAS
+     * ============================================================
+     *
+     * Canvas:
+     *
+     *     height = 96 pixels
+     *     width  = text width
+     *
+     * The canvas itself is NOT rotated.
+     *
+     * Rotation is performed during conversion to printer raster
+     * data.
+     * ============================================================
+     */
+
+    function renderText() {
+
+      const text =
+        $("text").value;
+
+
+      const fontSize =
+        Number(
+          $("fontSize").value
+        ) || 48;
+
+
+      const font =
+        `${fontSize}px Arial`;
+
+
+      /*
+       * Measure text.
+       *
+       * We use the existing canvas context for measurement.
+       */
+
+      ctx.font = font;
+
+
+      const metrics =
+        ctx.measureText(text);
+
+
+      /*
+       * Horizontal padding.
+       *
+       * Change to 0 if absolutely no padding is wanted.
+       */
+
+      const paddingX = 4;
+
+
+      /*
+       * Canvas width is based on rendered text width.
+       */
+
+      const width =
+        Math.max(
+          1,
+          Math.ceil(metrics.width) +
+          paddingX * 2
+        );
+
+
+      /*
+       * Set INTERNAL canvas dimensions.
+       *
+       * Height is always exactly 96 dots.
+       */
+
+      canvas.width =
+        width;
+
+
+      canvas.height =
+        L13.HEIGHT;
+
+
+      /*
+       * IMPORTANT:
+       *
+       * Changing canvas.width or canvas.height resets
+       * the canvas rendering context.
+       */
+
+      ctx.font =
+        font;
+
+
+      ctx.textAlign =
+        "left";
+
+
+      ctx.textBaseline =
+        "middle";
+
+
+      /*
+       * White background.
+       */
+
+      ctx.fillStyle =
+        "white";
+
+
+      ctx.fillRect(
+        0,
+        0,
+        canvas.width,
+        canvas.height
+      );
+
+
+      /*
+       * Black text.
+       */
+
+      ctx.fillStyle =
+        "black";
+
+
+      ctx.fillText(
+        text,
+        paddingX,
+        canvas.height / 2
+      );
+
+
+      /*
+       * Update UI.
+       */
+
+      $("canvasWidth").textContent =
+        canvas.width;
+
+
+      $("canvasHeight").textContent =
+        canvas.height;
+
+    }
+
+
+    /*
+     * ============================================================
+     * CONNECT USING WEB SERIAL
+     * ============================================================
+     */
+
+    async function connectPrinter() {
+
+      /*
+       * Check browser support.
+       */
+
+      if (
+        !("serial" in navigator)
+      ) {
+
+        throw new Error(
+          "Web Serial is not supported by this browser."
+        );
+
+      }
+
+
+      status(
+        "Select the printer's serial port..."
+      );
+
+
+      /*
+       * Open browser serial device picker.
+       */
+
+      port =
+        await navigator.serial.requestPort();
+
+
+      status(
+        "Opening serial port..."
+      );
+
+
+      /*
+       * Open at 115200 baud.
+       */
+
+      await port.open({
+
+        baudRate:
+          SERIAL.baudRate
+
+      });
+
+
+      /*
+       * Obtain exclusive writer.
+       */
+
+      writer =
+        port.writable.getWriter();
+
+
+      /*
+       * Update UI.
+       */
+
+      $("connect").disabled = true;
+      $("print").disabled = false;
+      $("disconnect").disabled = false;
+
+      status(
+        "Connected.\n\n" +
+        "Baud rate: " +
+        SERIAL.baudRate
+      );
+    }
+
+
+    /*
+     * ============================================================
+     * SERIAL WRITE
+     * ============================================================
+     */
+
+    async function write(data) {
+
+      if (!writer) {
+
+        throw new Error(
+          "Printer is not connected."
+        );
+
+      }
+
+
+      console.log(
+        "TX:",
+        hex(data)
+      );
+
+
+      /*
+       * Web Serial write.
+       */
+
+      await writer.write(data);
+
+    }
+
+
+    /*
+     * ============================================================
+     * CHUNKED WRITE
+     * ============================================================
+     *
+     * The original printer implementation used approximately
+     * 180-byte chunks. We keep that behavior here.
+     * ============================================================
+     */
+
+    async function writeChunked(
+      data,
+      chunkSize = 180
+    ) {
+
+      for (
+        let offset = 0;
+        offset < data.length;
+        offset += chunkSize
+      ) {
+
+        const end =
+          Math.min(
+            offset + chunkSize,
+            data.length
+          );
+
+
+        const chunk =
+          data.slice(
+            offset,
+            end
+          );
+
+
+        await write(
+          chunk
+        );
+
+
+        /*
+         * Small delay for printer reliability.
+         */
+
+        await sleep(2);
+
+      }
+
+    }
+
+
+    /*
+     * ============================================================
+     * SLEEP
+     * ============================================================
+     */
+
+    function sleep(ms) {
+
+      return new Promise(
+        resolve =>
+          setTimeout(
+            resolve,
+            ms
+          )
+      );
+
+    }
+
+
+    /*
+     * ============================================================
+     * CANVAS → ROTATED PRINTER RASTER
+     * ============================================================
+     *
+     * THIS IS THE IMPORTANT PART.
+     *
+     * Canvas:
+     *
+     *                 width = text width
+     *                 height = 96
+     *
+     *
+     *       x →
+     *
+     *       +------------------------+
+     *       |                        |
+     *       |        TEXT            |
+     *       |                        |
+     *       +------------------------+
+     *       |
+     *       ↓
+     *       96 pixels
+     *
+     *
+     * Printer raster:
+     *
+     * Each CANVAS COLUMN becomes one PRINTER ROW.
+     *
+     *
+     * Canvas column 0
+     *        ↓
+     * Printer row 0:
+     *
+     *   [96 pixels]
+     *
+     *
+     * Canvas column 1
+     *        ↓
+     * Printer row 1:
+     *
+     *   [96 pixels]
+     *
+     *
+     * Therefore:
+     *
+     * Canvas:
+     *
+     *     W × 96
+     *
+     * becomes:
+     *
+     *     96 × W
+     *
+     * printer raster.
+     * ============================================================
+     */
+
+    function canvasToRaster() {
+
+      /*
+       * Original canvas dimensions.
+       */
+
+      const sourceWidth =
+        canvas.width;
+
+
+      const sourceHeight =
+        canvas.height;
+
+
+      /*
+       * Source height must be 96.
+       */
+
+      if (
+        sourceHeight !==
+        L13.HEIGHT
+      ) {
+
+        throw new Error(
+          "Canvas height must be 96 pixels."
+        );
+
+      }
+
+
+      /*
+       * After rotation:
+       *
+       * printer width = 96
+       * printer height = text width
+       */
+
+      const printerWidth =
+        sourceHeight;
+
+
+      const printerHeight =
+        sourceWidth;
+
+
+      /*
+       * 96 pixels / 8 = 12 bytes per printer row.
+       */
+
+      const widthBytes =
+        Math.ceil(
+          printerWidth / 8
+        );
+
+
+      /*
+       * Read source canvas pixels.
+       */
+
+      const imageData =
+        ctx.getImageData(
+          0,
+          0,
+          sourceWidth,
+          sourceHeight
+        );
+
+
+      const rgba =
+        imageData.data;
+
+
+      /*
+       * ESC/POS GS v 0 header.
+       *
+       *     1D 76 30 00
+       *
+       *     xL xH
+       *     yL yH
+       *
+       * x = bytes per row
+       * y = number of rows
+       */
+
+      const header =
+        Uint8Array.from([
+
+          0x1d,
+          0x76,
+          0x30,
+          0x00,
+
+          widthBytes & 0xff,
+
+          (widthBytes >> 8) & 0xff,
+
+          printerHeight & 0xff,
+
+          (printerHeight >> 8) & 0xff
+
+        ]);
+
+
+      /*
+       * Allocate bitmap.
+       *
+       * 12 bytes × text width.
+       */
+
+      const bitmap =
+        new Uint8Array(
+          widthBytes *
+          printerHeight
+        );
+
+
+      /*
+       * ----------------------------------------------------------
+       * TRANSPOSE / ROTATE
+       * ----------------------------------------------------------
+       *
+       * sourceX = canvas column
+       * sourceY = canvas row
+       *
+       * destination:
+       *
+       * printerY = sourceX
+       * printerX = sourceY
+       *
+       * This means:
+       *
+       *     canvas column 0 → printer row 0
+       *     canvas column 1 → printer row 1
+       *     canvas column 2 → printer row 2
+       *
+       * etc.
+       * ----------------------------------------------------------
+       */
+
+      for (
+        let sourceX = 0;
+        sourceX < sourceWidth;
+        sourceX++
+      ) {
+
+        /*
+         * Canvas column becomes printer row.
+         */
+
+        const printerY =
+          sourceX;
+
+
+        for (
+          let sourceY = 0;
+          sourceY < sourceHeight;
+          sourceY++
+        ) {
+
+          /*
+           * Find RGBA pixel in canvas.
+           */
+
+          const pixelIndex =
+            (
+              sourceY *
+              sourceWidth +
+              sourceX
+            ) * 4;
+
+
+          const r =
+            rgba[pixelIndex];
+
+
+          const g =
+            rgba[pixelIndex + 1];
+
+
+          const b =
+            rgba[pixelIndex + 2];
+
+
+          const a =
+            rgba[pixelIndex + 3];
+
+
+          /*
+           * Transparent pixels are treated as white.
+           */
+
+          const alpha =
+            a / 255;
+
+
+          const rr =
+            255 -
+            (255 - r) * alpha;
+
+
+          const gg =
+            255 -
+            (255 - g) * alpha;
+
+
+          const bb =
+            255 -
+            (255 - b) * alpha;
+
+
+          /*
+           * Calculate luminance.
+           */
+
+          const luminance =
+            0.299 * rr +
+            0.587 * gg +
+            0.114 * bb;
+
+
+          /*
+           * Black pixel.
+           */
+
+          if (
+            luminance < 128
+          ) {
+
+            /*
+             * Canvas Y becomes printer X.
+             */
+
+            const printerX =
+              sourceHeight - 1 - sourceY;
+
+
+            /*
+             * Find byte containing printer X.
+             */
+
+            const byteIndex =
+              printerY *
+              widthBytes +
+              Math.floor(
+                printerX / 8
+              );
+
+
+            /*
+             * MSB is the first/leftmost pixel.
+             */
+
+            const bit =
+              7 -
+              (printerX % 8);
+
+
+            bitmap[byteIndex] |=
+              1 << bit;
+
+          }
+
+        }
+
+      }
+
+
+      /*
+       * ----------------------------------------------------------
+       * COMBINE HEADER + BITMAP
+       * ----------------------------------------------------------
+       */
+
+      const result =
+        new Uint8Array(
+          header.length +
+          bitmap.length
+        );
+
+
+      result.set(
+        header,
+        0
+      );
+
+
+      result.set(
+        bitmap,
+        header.length
+      );
+
+
+      /*
+       * Return both data and useful dimensions.
+       */
+
+      return {
+
+        data:
+          result,
+
+        width:
+          printerWidth,
+
+        height:
+          printerHeight,
+
+        widthBytes:
+          widthBytes,
+
+        sourceWidth:
+          sourceWidth,
+
+        sourceHeight:
+          sourceHeight
+
+      };
+
+    }
+
+
+    /*
+     * ============================================================
+     * PRINT CANVAS
+     * ============================================================
+     */
+
+    async function printCanvas() {
+
+      /*
+       * Convert canvas to rotated printer raster.
+       */
+
+      const raster =
+        canvasToRaster();
+
+
+      console.log(
+        "Source canvas:",
+        raster.sourceWidth,
+        "×",
+        raster.sourceHeight
+      );
+
+
+      console.log(
+        "Printer raster:",
+        raster.width,
+        "×",
+        raster.height
+      );
+
+
+      console.log(
+        "Bytes per printer row:",
+        raster.widthBytes
+      );
+
+
+      console.log(
+        "Raster data:",
+        hex(raster.data)
+      );
+
+
+      status(
+        "Printing...\n\n" +
+
+        "Source canvas: " +
+        raster.sourceWidth +
+        " × " +
+        raster.sourceHeight +
+        " px\n\n" +
+
+        "Printer raster: " +
+        raster.width +
+        " × " +
+        raster.height +
+        " px\n\n" +
+
+        "Bytes per row: " +
+        raster.widthBytes +
+        "\n\n" +
+
+        "Raster bytes: " +
+        raster.data.length
+      );
+
+
+      /*
+       * ==========================================================
+       * 1. SET DENSITY
+       * ==========================================================
+       */
+
+      await write(
+        L13.SET_DENSITY_MEDIUM
+      );
+
+
+      await sleep(20);
+
+
+      /*
+       * ==========================================================
+       * 2. PAPER GAP
+       * ==========================================================
+       *
+       * Disabled because this was disabled in your original
+       * working protocol.
+       *
+       * Uncomment if required.
+       */
+
+      // await write(
+      //   L13.SET_PAPER_GAP
+      // );
+
+      // await sleep(20);
+
+
+      /*
+       * ==========================================================
+       * 3. WAKE
+       * ==========================================================
+       */
+
+      await write(
+        L13.WAKE
+      );
+
+
+      await sleep(20);
+
+
+      /*
+       * ==========================================================
+       * 4. ENABLE
+       * ==========================================================
+       */
+
+      await write(
+        L13.ENABLE
+      );
+
+
+      await sleep(30);
+
+      const REVERSE_FEED_40 = Uint8Array.from([
+        0x1f,
+        0x11,
+        0x11,
+        60
+      ]);
+
+      await write(REVERSE_FEED_40);
+      console.log('reverse feed')
+
+      await sleep(300);
+
+
+      /*
+       * ==========================================================
+       * 5. RASTER DATA
+       * ==========================================================
+       *
+       * The raster is already rotated:
+       *
+       *     canvas column → printer row
+       *
+       * and has:
+       *
+       *     96 dots per row.
+       * ==========================================================
+       */
+
+      await writeChunked(
+        raster.data,
+        180
+      );
+
+
+      /*
+       * Give printer time to process raster.
+       */
+
+      await sleep(200);
+
+
+      /*
+       * ==========================================================
+       * 6. FORM FEED
+       * ==========================================================
+       */
+
+      //await write(
+      //  L13.FORM_FEED
+      //);
+
+
+      /*
+       * ==========================================================
+       * 7. ADVANCE
+       * ==========================================================
+       */
+
+      await write(
+        L13.ADVANCE
+      );
+
+
+      await sleep(20);
+
+
+      /*
+       * ==========================================================
+       * 8. STOP
+       * ==========================================================
+       */
+
+      await write(
+        L13.STOP
+      );
+
+
+      status(
+        "Print sequence sent.\n\n" +
+
+        "Source canvas: " +
+        raster.sourceWidth +
+        " × " +
+        raster.sourceHeight +
+        " px\n\n" +
+
+        "Printer raster: " +
+        raster.width +
+        " × " +
+        raster.height +
+        " px\n\n" +
+
+        "Bytes per row: " +
+        raster.widthBytes +
+        "\n" +
+
+        "Raster bytes: " +
+        raster.data.length
+      );
+
+    }
+
+
+    /*
+     * ============================================================
+     * DISCONNECT
+     * ============================================================
+     */
+
+    async function disconnect() {
+
+      try {
+
+        /*
+         * Release writer first.
+         */
+
+        if (writer) {
+
+          writer.releaseLock();
+
+          writer = null;
+
+        }
+
+
+        /*
+         * Close serial port.
+         */
+
+        if (port) {
+
+          await port.close();
+
+          port = null;
+
+        }
+
+      } catch (err) {
+
+        console.error(
+          "Disconnect error:",
+          err
+        );
+
+      }
+
+
+      /*
+       * Update UI.
+       */
+
+      $("connect").disabled =
+        false;
+
+
+      $("print").disabled =
+        true;
+
+
+      $("disconnect").disabled =
+        true;
+
+
+      status(
+        "Disconnected."
+      );
+
+    }
+
+
+    /*
+     * ============================================================
+     * TEXT INPUT
+     * ============================================================
+     */
+
+    $("text").addEventListener(
+      "input",
+      renderText
+    );
+
+
+    /*
+     * ============================================================
+     * FONT SIZE
+     * ============================================================
+     */
+
+    $("fontSize").addEventListener("input", () => {
+      $("fontSizeValue").textContent = $("fontSize").value; renderText();
+    });
+
+
+    /*
+     * ============================================================
+     * CONNECT BUTTON
+     * ============================================================
+     */
+
+    $("connect").addEventListener(
+      "click",
+      async () => {
+
+        try {
+
+          await connectPrinter();
+
+        } catch (err) {
+
+          console.error(err);
+
+          status(
+            "Connection failed:\n\n" +
+            err.message
+          );
+
+        }
+
+      }
+    );
+
+
+    /*
+     * ============================================================
+     * PRINT BUTTON
+     * ============================================================
+     */
+
+    $("print").addEventListener(
+      "click",
+      async () => {
+
+        try {
+
+          await printCanvas();
+
+        } catch (err) {
+
+          console.error(err);
+
+          status(
+            "Print failed:\n\n" +
+            err.message
+          );
+
+        }
+
+      }
+    );
+
+
+    /*
+     * ============================================================
+     * DISCONNECT BUTTON
+     * ============================================================
+     */
+
+    $("disconnect").addEventListener(
+      "click",
+      disconnect
+    );
+
+    /*
+     * ============================================================
+     * AUTOCONNECT ON STARTUP
+     * ============================================================
+     */
+
+    async function autoConnectPrinter() {
+      if (!("serial" in navigator)) {
+        status("Web Serial is not supported by this browser.");
+        return;
+      }
+
+      try {
+        const ports = await navigator.serial.getPorts();
+
+        console.log(ports);
+
+        if (!ports.length) {
+          status("No previously authorized printer found.");
+          return;
+        }
+
+        port = ports[0];
+
+        if (!port.readable && !port.writable) {
+          await port.open({ baudRate: SERIAL.baudRate });
+        }
+
+        writer = port.writable.getWriter();
+
+        $("connect").disabled = true;
+        $("print").disabled = false;
+        $("disconnect").disabled = false;
+
+        status("Automatically connected.\n\nBaud rate: " + SERIAL.baudRate);
+      } catch (err) {
+        console.error(err);
+        status("Automatic connection failed:\n\n" + err.message);
+      }
+    }
+
+    autoConnectPrinter();
+
+
+
+    /*
+     * ============================================================
+     * INITIAL RENDER
+     * ============================================================
+     */
+
+    renderText();
+
+
+  </script>
+
+</body>
+
+</html>
