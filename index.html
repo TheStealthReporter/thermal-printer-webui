@@ -1397,25 +1397,27 @@
      * ============================================================
      */
 
+    $('text').addEventListener('keydown', async (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        try {
+          await printCanvas();
+        } catch (err) {
+          console.error(err);
+          status("Print failed:\n\n" + err.message);
+        }
+      }
+    });
+
     $("print").addEventListener(
       "click",
       async () => {
-
         try {
-
           await printCanvas();
-
         } catch (err) {
-
           console.error(err);
-
-          status(
-            "Print failed:\n\n" +
-            err.message
-          );
-
+          status("Print failed:\n\n" + err.message);
         }
-
       }
     );
 
