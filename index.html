@@ -80,18 +80,25 @@
 
 <body>
 
-  <h1>L13 Web Serial Text Printer</h1>
+  <h1>Label Text Printer</h1>
 
-  <p>
-    Enter text, preview it on the 96-dot-high canvas,
-    then print it over Web Serial.
-  </p>
+  <!-- <p> Enter text, preview it on the 96-dot-high canvas, then print it over Web Serial.  </p> -->
 
   <!-- =========================================================
      TEXT INPUT
      ========================================================= -->
 
-  <input id="text" type="text" value="Hello World!" placeholder="Enter text..." autocomplete="off">
+  <input id="text" type="text" value="" placeholder="Enter text..." autocomplete="off" autofocus>
+
+  <p>
+
+    <label>
+      Font size: <span id="fontSizeValue">48</span> px
+      <input id="fontSize" type="range" value="48" min="1" max="96">
+
+    </label>
+
+  </p>
 
   <!-- =========================================================
      CANVAS
@@ -126,18 +133,6 @@
     </button>
 
   </div>
-
-  <p>
-
-    <label>
-      Font size:
-
-      <input id="fontSize" type="range" value="48" min="1" max="96">
-      <span id="fontSizeValue">48</span> px
-
-    </label>
-
-  </p>
 
   <!-- =========================================================
      STATUS
